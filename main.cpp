@@ -14,7 +14,7 @@
 #pragma comment(lib, "psapi.lib")
 
 // === CONFIGURATION ===
-constexpr DWORD MEDIA_GRACE_PERIOD_MS = 10000;    // 15 seconds pause after media stops
+constexpr DWORD MEDIA_GRACE_PERIOD_MS = 20000;    // 20 seconds pause after media stops
 constexpr DWORD LOOP_INTERVAL_MS = 1000;          // 1 second loop
 
 // === GLOBAL STATE ===
