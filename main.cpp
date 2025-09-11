@@ -32,6 +32,54 @@ DWORD GetIdleTime() {
     return GetTickCount() - li.dwTime;
 }
 
+bool IsShellOrTaskbarFocused()
+{
+    HWND hwndForeground = GetForegroundWindow();
+    if (!hwndForeground) return false;
+
+    // Taskbar
+    HWND hTaskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+    if (hwndForeground == hTaskbar) return true;
+
+    // Start button (on taskbar)
+    HWND hStart = FindWindowW(L"Start", nullptr);
+    if (hwndForeground == hStart) return true;
+
+    // Sometimes the Start button is "Button" with taskbar parent
+    wchar_t className[256];
+    GetClassNameW(hwndForeground, className, 256);
+    if (wcscmp(className, L"Button") == 0) {
+        HWND hParent = GetParent(hwndForeground);
+        if (hParent == hTaskbar) return true;
+    }
+
+    // Desktop
+    HWND hDesktop = GetShellWindow();
+    if (hwndForeground == hDesktop) return true;
+    if (wcscmp(className, L"Progman") == 0) return true;
+    if (wcscmp(className, L"WorkerW") == 0) return true;
+
+    return false;
+}
+
+static HWND g_hTaskbar = nullptr;
+static bool g_taskbarWasHidden = false;
+
+void HideTaskbar()
+{
+    if (!g_hTaskbar)
+        g_hTaskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+
+    if (g_hTaskbar)
+        ShowWindow(g_hTaskbar, SW_HIDE);
+}
+
+void ShowTaskbar()
+{
+    if (g_hTaskbar)
+        ShowWindow(g_hTaskbar, SW_SHOW);
+}
+
 DWORD g_screensaverPID = 0;
 
 void TriggerScreensaver() {
@@ -48,10 +96,20 @@ void TriggerScreensaver() {
 
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
+	
+	if (IsShellOrTaskbarFocused()) {
+		HideTaskbar();
+		g_taskbarWasHidden = true;
+	}
 }
 
 void KillScreensaver() {
-    if (g_screensaverPID != 0) {
+	if (g_taskbarWasHidden) {
+		ShowTaskbar();
+		g_taskbarWasHidden = false;
+	}
+	
+	if (g_screensaverPID != 0) {
         HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, g_screensaverPID);
         if (hProc) {
             TerminateProcess(hProc, 0);
@@ -251,12 +309,10 @@ bool IsAudioPlayingFromWhitelistedProcess() {
                                 hr = pMeter->GetPeakValue(&peak);
                                 
                                 if (SUCCEEDED(hr)) {
-                                    // PRIORITY 1: Actual audio detected (even very quiet)
                                     if (peak > 0.001f) {
                                         audioPlaying = true;
-                                        g_lastActiveSessionTime = GetTickCount(); // Reset grace timer
+                                        g_lastActiveSessionTime = GetTickCount();
                                     }
-                                    // PRIORITY 2: Active session but silent - limited grace period
                                     else if (sessionState == AudioSessionStateActive) {
                                         hasActiveSession = true;
                                         if (g_lastActiveSessionTime == 0) {
@@ -299,29 +355,49 @@ void CleanupAudio() {
 }
 
 int main() {
-	HANDLE hMutex = CreateMutexA(nullptr, FALSE, "Global\\ScreensaverManagerMutex");
+    HANDLE hMutex = CreateMutexA(nullptr, FALSE, "Global\\ScreensaverManagerMutex");
     if (!hMutex) return 1;
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         CloseHandle(hMutex);
         return 0; 
     }
-	
+    
     LoadWhitelist("whitelist.txt");
-	LoadConfig("app.config");
+    LoadConfig("app.config");
 
     bool screensaverActive = false;
     static bool lastMediaState = false;
-
-    InitAudio();
+    
+    bool audioReady = false;
+    bool initialAudioSetup = false;
+    DWORD lastAudioRetry = 0;
+    const DWORD AUDIO_RETRY_INTERVAL = 5000; 
 
     while (true) {
+        DWORD now = GetTickCount();
+        
+        if (!initialAudioSetup) {
+            audioReady = InitAudio();
+            if (audioReady) {
+                initialAudioSetup = true; 
+            } else {
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+                continue;
+            }
+        }
+        
+        else if ((now - lastAudioRetry) > AUDIO_RETRY_INTERVAL) {
+            audioReady = InitAudio();
+            lastAudioRetry = now;
+        }
+
         DWORD idleTime = GetIdleTime();
         auto whitelistedPids = GetWhitelistedProcessIds();
         bool match = !whitelistedPids.empty();
         isWhitelistedAppRunning = match;
 
         if (match) {
-            bool currentMediaState = g_audioInitialized ? 
+            bool currentMediaState = audioReady ? 
                 IsAudioPlayingFromWhitelistedProcess() : false;
 
             if (lastMediaState && !currentMediaState) {
