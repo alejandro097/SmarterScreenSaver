@@ -155,7 +155,6 @@ void LoadConfig(const std::string& path) {
             std::string key = line.substr(0, pos);
             std::string value = line.substr(pos + 1);
             
-            // Trim key and value
             key.erase(key.find_last_not_of(" \t") + 1);
             key.erase(0, key.find_first_not_of(" \t"));
             value.erase(value.find_last_not_of(" \t") + 1);
@@ -235,8 +234,29 @@ IMMDevice* g_pDevice = nullptr;
 IAudioSessionManager2* g_pSessionManager = nullptr;
 bool g_audioInitialized = false;
 
+void CleanupAudio() {
+    if (g_pSessionManager) { 
+        g_pSessionManager->Release(); 
+        g_pSessionManager = nullptr; 
+    }
+    if (g_pDevice) { 
+        g_pDevice->Release(); 
+        g_pDevice = nullptr; 
+    }
+    if (g_pEnumerator) { 
+        g_pEnumerator->Release(); 
+        g_pEnumerator = nullptr; 
+    }
+    if (g_audioInitialized) {
+        CoUninitialize();
+        g_audioInitialized = false;
+    }
+}
+
 bool InitAudio() {
-    if (g_audioInitialized) return true;
+    if (g_audioInitialized) {
+        CleanupAudio();
+    }
 
     HRESULT hr = CoInitialize(nullptr);
     if (FAILED(hr)) return false;
@@ -247,13 +267,22 @@ bool InitAudio() {
 
     hr = CoCreateInstance(CLSID_MMDeviceEnumerator, nullptr, CLSCTX_ALL,
                           IID_IMMDeviceEnumerator, (void**)&g_pEnumerator);
-    if (FAILED(hr)) return false;
+    if (FAILED(hr)) {
+        CoUninitialize();
+        return false;
+    }
 
     hr = g_pEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &g_pDevice);
-    if (FAILED(hr)) return false;
+    if (FAILED(hr)) {
+        CleanupAudio();
+        return false;
+    }
 
     hr = g_pDevice->Activate(IID_IAudioSessionManager2, CLSCTX_ALL, nullptr, (void**)&g_pSessionManager);
-    if (FAILED(hr)) return false;
+    if (FAILED(hr)) {
+        CleanupAudio();
+        return false;
+    }
 
     g_audioInitialized = true;
     return true;
@@ -267,12 +296,16 @@ bool IsAudioPlayingFromWhitelistedProcess() {
 
     IAudioSessionEnumerator* pSessionEnumerator = nullptr;
     HRESULT hr = g_pSessionManager->GetSessionEnumerator(&pSessionEnumerator);
-    if (FAILED(hr)) return false;
+    if (FAILED(hr)) {
+        CleanupAudio(); 
+        return false;
+    }
 
     int sessionCount = 0;
     hr = pSessionEnumerator->GetCount(&sessionCount);
     if (FAILED(hr)) {
         pSessionEnumerator->Release();
+        CleanupAudio();  
         return false;
     }
 
@@ -295,37 +328,37 @@ bool IsAudioPlayingFromWhitelistedProcess() {
             if (SUCCEEDED(hr)) {
                 for (DWORD whitelistedPid : whitelistedPids) {
                     if (processId == whitelistedPid) {
-                        // Check session state
                         AudioSessionState sessionState;
                         hr = pSessionControl->GetState(&sessionState);
                         
                         if (SUCCEEDED(hr)) {
-                            IAudioMeterInformation* pMeter = nullptr;
-                            const GUID IID_IAudioMeterInformation = {0xc02216f6,0x8c67,0x4b5b,{0x9d,0x00,0xd0,0x08,0xe7,0x3e,0x00,0x64}};
-                            hr = pSessionControl->QueryInterface(IID_IAudioMeterInformation, (void**)&pMeter);
-                            
-                            if (SUCCEEDED(hr)) {
-                                float peak = 0.0f;
-                                hr = pMeter->GetPeakValue(&peak);
+                            if (sessionState == AudioSessionStateActive || sessionState == AudioSessionStateInactive) {
+                                hasActiveSession = true;
+                                if (g_lastActiveSessionTime == 0) {
+                                    g_lastActiveSessionTime = GetTickCount();
+                                }
+                                
+                                IAudioMeterInformation* pMeter = nullptr;
+                                const GUID IID_IAudioMeterInformation = {0xc02216f6,0x8c67,0x4b5b,{0x9d,0x00,0xd0,0x08,0xe7,0x3e,0x00,0x64}};
+                                hr = pSessionControl->QueryInterface(IID_IAudioMeterInformation, (void**)&pMeter);
                                 
                                 if (SUCCEEDED(hr)) {
-                                    if (peak > 0.001f) {
-                                        audioPlaying = true;
-                                        g_lastActiveSessionTime = GetTickCount();
-                                    }
-                                    else if (sessionState == AudioSessionStateActive) {
-                                        hasActiveSession = true;
-                                        if (g_lastActiveSessionTime == 0) {
-                                            g_lastActiveSessionTime = GetTickCount();
-                                        }
-                                        
-                                        DWORD timeSinceActive = GetTickCount() - g_lastActiveSessionTime;
-                                        if (timeSinceActive < MEDIA_GRACE_PERIOD_MS) {
+                                    float peak = 0.0f;
+                                    hr = pMeter->GetPeakValue(&peak);
+                                    
+                                    if (SUCCEEDED(hr)) {
+                                        if (peak > 0.001f) {
                                             audioPlaying = true;
+                                            g_lastActiveSessionTime = GetTickCount();
+                                        } else {
+                                            DWORD timeSinceActive = GetTickCount() - g_lastActiveSessionTime;
+                                            if (timeSinceActive < MEDIA_GRACE_PERIOD_MS) {
+                                                audioPlaying = true;
+                                            }
                                         }
                                     }
+                                    pMeter->Release();
                                 }
-                                pMeter->Release();
                             }
                         }
                         break;
@@ -347,13 +380,6 @@ bool IsAudioPlayingFromWhitelistedProcess() {
     return audioPlaying;
 }
 
-void CleanupAudio() {
-    if (g_pSessionManager) { g_pSessionManager->Release(); g_pSessionManager = nullptr; }
-    if (g_pDevice) { g_pDevice->Release(); g_pDevice = nullptr; }
-    if (g_pEnumerator) { g_pEnumerator->Release(); g_pEnumerator = nullptr; }
-    if (g_audioInitialized) CoUninitialize();
-}
-
 int main() {
     HANDLE hMutex = CreateMutexA(nullptr, FALSE, "Global\\ScreensaverManagerMutex");
     if (!hMutex) return 1;
@@ -366,12 +392,10 @@ int main() {
     LoadConfig("app.config");
 
     bool screensaverActive = false;
-    static bool lastMediaState = false;
+    static bool wasMediaPlaying = false;
     
     bool audioReady = false;
     bool initialAudioSetup = false;
-    DWORD lastAudioRetry = 0;
-    const DWORD AUDIO_RETRY_INTERVAL = 5000; 
 
     while (true) {
         DWORD now = GetTickCount();
@@ -386,9 +410,8 @@ int main() {
             }
         }
         
-        else if ((now - lastAudioRetry) > AUDIO_RETRY_INTERVAL) {
+        if (!g_audioInitialized) {
             audioReady = InitAudio();
-            lastAudioRetry = now;
         }
 
         DWORD idleTime = GetIdleTime();
@@ -400,15 +423,18 @@ int main() {
             bool currentMediaState = audioReady ? 
                 IsAudioPlayingFromWhitelistedProcess() : false;
 
-            if (lastMediaState && !currentMediaState) {
+            if (wasMediaPlaying && !currentMediaState) {
                 mediaStoppedTime = GetTickCount();
+            } else if (!wasMediaPlaying && currentMediaState) {
+                mediaStoppedTime = 0;
             }
 
             isMediaPlaying = currentMediaState;
-            lastMediaState = currentMediaState;
+            wasMediaPlaying = currentMediaState;
 
         } else {
             isMediaPlaying = false;
+            wasMediaPlaying = false;
         }
 
         if (idleTime > IDLE_THRESHOLD_MS) {
