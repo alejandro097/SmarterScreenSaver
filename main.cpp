@@ -14,7 +14,7 @@
 #pragma comment(lib, "psapi.lib")
 
 // === CONFIGURATION ===
-constexpr DWORD MEDIA_GRACE_PERIOD_MS = 20000;    // 20 seconds pause after media stops
+constexpr DWORD MEDIA_GRACE_PERIOD_MS = 15000;    // 15 seconds pause after media stops
 constexpr DWORD LOOP_INTERVAL_MS = 1000;          // 1 second loop
 
 // === GLOBAL STATE ===
@@ -213,6 +213,15 @@ std::string GetProcessName(DWORD pid) {
     return "Unknown";
 }
 
+bool IsExecutableWhitelisted(const std::string& executableName) {
+    for (const auto& whitelistedName : whitelist) {
+        if (_stricmp(executableName.c_str(), whitelistedName.c_str()) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 #ifndef __IAudioMeterInformation_INTERFACE_DEFINED__
 #define __IAudioMeterInformation_INTERFACE_DEFINED__
 
@@ -272,7 +281,7 @@ bool InitAudio() {
         return false;
     }
 
-    hr = g_pEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &g_pDevice);
+    hr = g_pEnumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &g_pDevice);
     if (FAILED(hr)) {
         CleanupAudio();
         return false;
@@ -290,9 +299,6 @@ bool InitAudio() {
 
 bool IsAudioPlayingFromWhitelistedProcess() {
     if (!g_audioInitialized) return false;
-    
-    auto whitelistedPids = GetWhitelistedProcessIds();
-    if (whitelistedPids.empty()) return false;
 
     IAudioSessionEnumerator* pSessionEnumerator = nullptr;
     HRESULT hr = g_pSessionManager->GetSessionEnumerator(&pSessionEnumerator);
@@ -325,43 +331,42 @@ bool IsAudioPlayingFromWhitelistedProcess() {
             DWORD processId = 0;
             hr = pSessionControl2->GetProcessId(&processId);
             
-            if (SUCCEEDED(hr)) {
-                for (DWORD whitelistedPid : whitelistedPids) {
-                    if (processId == whitelistedPid) {
-                        AudioSessionState sessionState;
-                        hr = pSessionControl->GetState(&sessionState);
-                        
-                        if (SUCCEEDED(hr)) {
-                            if (sessionState == AudioSessionStateActive || sessionState == AudioSessionStateInactive) {
-                                hasActiveSession = true;
-                                if (g_lastActiveSessionTime == 0) {
-                                    g_lastActiveSessionTime = GetTickCount();
-                                }
-                                
-                                IAudioMeterInformation* pMeter = nullptr;
-                                const GUID IID_IAudioMeterInformation = {0xc02216f6,0x8c67,0x4b5b,{0x9d,0x00,0xd0,0x08,0xe7,0x3e,0x00,0x64}};
-                                hr = pSessionControl->QueryInterface(IID_IAudioMeterInformation, (void**)&pMeter);
+            if (SUCCEEDED(hr) && processId != 0) {
+                std::string executableName = GetProcessName(processId);
+                
+                if (IsExecutableWhitelisted(executableName)) {
+                    AudioSessionState sessionState;
+                    hr = pSessionControl->GetState(&sessionState);
+                    
+                    if (SUCCEEDED(hr)) {
+                        if (sessionState == AudioSessionStateActive || sessionState == AudioSessionStateInactive) {
+                            hasActiveSession = true;
+                            if (g_lastActiveSessionTime == 0) {
+                                g_lastActiveSessionTime = GetTickCount();
+                            }
+                            
+                            IAudioMeterInformation* pMeter = nullptr;
+                            const GUID IID_IAudioMeterInformation = {0xc02216f6,0x8c67,0x4b5b,{0x9d,0x00,0xd0,0x08,0xe7,0x3e,0x00,0x64}};
+                            hr = pSessionControl->QueryInterface(IID_IAudioMeterInformation, (void**)&pMeter);
+                            
+                            if (SUCCEEDED(hr)) {
+                                float peak = 0.0f;
+                                hr = pMeter->GetPeakValue(&peak);
                                 
                                 if (SUCCEEDED(hr)) {
-                                    float peak = 0.0f;
-                                    hr = pMeter->GetPeakValue(&peak);
-                                    
-                                    if (SUCCEEDED(hr)) {
-                                        if (peak > 0.001f) {
+                                    if (peak > 0.001f) {
+                                        audioPlaying = true;
+                                        g_lastActiveSessionTime = GetTickCount();
+                                    } else {
+                                        DWORD timeSinceActive = GetTickCount() - g_lastActiveSessionTime;
+                                        if (timeSinceActive < MEDIA_GRACE_PERIOD_MS) {
                                             audioPlaying = true;
-                                            g_lastActiveSessionTime = GetTickCount();
-                                        } else {
-                                            DWORD timeSinceActive = GetTickCount() - g_lastActiveSessionTime;
-                                            if (timeSinceActive < MEDIA_GRACE_PERIOD_MS) {
-                                                audioPlaying = true;
-                                            }
                                         }
                                     }
-                                    pMeter->Release();
                                 }
+                                pMeter->Release();
                             }
                         }
-                        break;
                     }
                 }
             }
