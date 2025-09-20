@@ -21,6 +21,18 @@ constexpr DWORD LOOP_INTERVAL_MS = 1000;          // 1 second loop
 std::atomic<bool> isWhitelistedAppRunning(false);
 std::atomic<bool> isMediaPlaying(false);
 std::vector<std::string> whitelist;
+std::string GetExecutableDirectory() {
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+    
+    std::string path = exePath;
+    size_t pos = path.find_last_of("\\/");
+    if (pos != std::string::npos) {
+        return path.substr(0, pos);
+    }
+    return "";
+}
+
 DWORD mediaStoppedTime = 0;
 DWORD g_lastActiveSessionTime = 0;
 DWORD IDLE_THRESHOLD_MS = 120000;   
@@ -213,6 +225,7 @@ std::string GetProcessName(DWORD pid) {
     return "Unknown";
 }
 
+// Helper function to check if an executable name matches whitelist
 bool IsExecutableWhitelisted(const std::string& executableName) {
     for (const auto& whitelistedName : whitelist) {
         if (_stricmp(executableName.c_str(), whitelistedName.c_str()) == 0) {
@@ -281,6 +294,7 @@ bool InitAudio() {
         return false;
     }
 
+    // Use eMultimedia instead of eConsole for better multimedia app detection
     hr = g_pEnumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &g_pDevice);
     if (FAILED(hr)) {
         CleanupAudio();
@@ -331,7 +345,8 @@ bool IsAudioPlayingFromWhitelistedProcess() {
             DWORD processId = 0;
             hr = pSessionControl2->GetProcessId(&processId);
             
-            if (SUCCEEDED(hr) && processId != 0) {
+            if (SUCCEEDED(hr) && processId != 0) { // Ignore system sessions (PID == 0)
+                // Get the executable name for this PID and check against whitelist
                 std::string executableName = GetProcessName(processId);
                 
                 if (IsExecutableWhitelisted(executableName)) {
@@ -393,8 +408,9 @@ int main() {
         return 0; 
     }
     
-    LoadWhitelist("whitelist.txt");
-    LoadConfig("app.config");
+	std::string exeDir = GetExecutableDirectory();
+	LoadWhitelist(exeDir + "\\whitelist.txt");
+	LoadConfig(exeDir + "\\app.config");
 
     bool screensaverActive = false;
     static bool wasMediaPlaying = false;
